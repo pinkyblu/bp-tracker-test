@@ -109,7 +109,7 @@ const CanvasList = forwardRef<CanvasListHandle, CanvasListProps>(({ onShowToast 
     const { item } = activeModal;
     if (!item.bestOfferOrderHash) { onShowToast('No valid offer found', 'error'); return; }
 
-    const protocolAddress = '0x0000000000000068F116a894984e2DB1123eB395'; // Seaport v1.6 Base
+    const protocolAddress = item.bestOfferProtocolAddress || '0x0000000000000068F116a894984e2DB1123eB395';
 
     setIsProcessing(true);
     try {

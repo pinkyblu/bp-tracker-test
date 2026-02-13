@@ -1,13 +1,21 @@
 import { useState, useCallback } from 'react';
-import { OpenSeaSDK, Chain, OrderSide } from 'opensea-js';
+import { OpenSeaSDK, Chain } from 'opensea-js';
 import { ethers } from 'ethers';
 import { BASEPAINT_NFT_CONTRACT, OPENSEA_API_KEY } from '../constants';
 import { CanvasItem } from '../types';
 
 const COLLECTION_SLUG = 'basepaint';
 const BASE_CHAIN = Chain.Base;
+const OS_BASE_URL  = 'https://api.opensea.io/api/v2';
+const CHAIN_NAME   = 'base';
 
-// Helper to build the SDK with the user's provider (needed for signing)
+// Headers for all REST calls
+const osHeaders = () => ({
+  'accept': 'application/json',
+  'x-api-key': OPENSEA_API_KEY,
+});
+
+// Build SDK with user wallet (needed only for signing / sending txs)
 function buildSDK(provider: any): OpenSeaSDK {
   const ethersProvider = new ethers.BrowserProvider(provider);
   return new OpenSeaSDK(ethersProvider, {
@@ -16,149 +24,177 @@ function buildSDK(provider: any): OpenSeaSDK {
   });
 }
 
-// Helper to build a read-only SDK (no wallet needed, for data fetching)
-function buildReadSDK(): OpenSeaSDK {
-  const readProvider = new ethers.JsonRpcProvider('https://mainnet.base.org');
-  return new OpenSeaSDK(readProvider as any, {
-    chain: BASE_CHAIN,
-    apiKey: OPENSEA_API_KEY,
-  });
+// ─── REST helpers ─────────────────────────────────────────────────────────────
+
+// GET /chain/{chain}/account/{address}/nfts  – paginated, filter by contract
+async function fetchNFTsByOwner(address: string): Promise<CanvasItem[]> {
+  const results: CanvasItem[] = [];
+  let next: string | null = null;
+
+  do {
+    const url = new URL(`${OS_BASE_URL}/chain/${CHAIN_NAME}/account/${address}/nfts`);
+    url.searchParams.set('limit', '200');
+    url.searchParams.set('collection', COLLECTION_SLUG);
+    if (next) url.searchParams.set('next', next);
+
+    const res = await fetch(url.toString(), { headers: osHeaders() });
+    if (!res.ok) throw new Error(`OpenSea NFTs error: ${res.status}`);
+    const data = await res.json();
+
+    for (const nft of (data.nfts ?? [])) {
+      const tokenId = String(nft.identifier);
+      const day = parseInt(tokenId, 10);
+      results.push({
+        id: tokenId,
+        day,
+        imageUrl: `https://basepaint.xyz/api/art/image?day=${day}`,
+        lastSale: 0,
+        bestOffer: 0,
+        listPrice: undefined,
+        isListed: false,
+      });
+    }
+
+    next = data.next ?? null;
+  } while (next && results.length < 500);
+
+  return results;
 }
 
-export function useOpenSea() {
-  const [isLoadingNFTs, setIsLoadingNFTs] = useState(false);
-  const [isLoadingOffers, setIsLoadingOffers] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+// GET /listings/collection/{slug}/best  – cheapest listing per token_id
+async function fetchBestListing(tokenId: string): Promise<{ listPrice?: number; isListed: boolean }> {
+  try {
+    const url = `${OS_BASE_URL}/listings/collection/${COLLECTION_SLUG}/best?limit=1&token_ids=${tokenId}`;
+    const res = await fetch(url, { headers: osHeaders() });
+    if (!res.ok) return { isListed: false };
+    const data = await res.json();
+    const listing = data.listings?.[0];
+    if (!listing) return { isListed: false };
 
-  // ─── 1. Fetch NFTs owned by a wallet that belong to BasePaint ────────────
-  const fetchOwnedBasePaints = useCallback(async (
-    walletAddress: string
-  ): Promise<CanvasItem[]> => {
+    const raw = listing.price?.current?.value;
+    const decimals = listing.price?.current?.decimals ?? 18;
+    if (!raw) return { isListed: false };
+
+    return {
+      listPrice: parseFloat(ethers.formatUnits(raw, decimals)),
+      isListed: true,
+    };
+  } catch {
+    return { isListed: false };
+  }
+}
+
+// GET /offers/collection/{slug}/best  – best offer for a token
+async function fetchBestOffer(tokenId: string): Promise<{ bestOffer: number; orderHash?: string; protocolAddress?: string }> {
+  try {
+    const url = `${OS_BASE_URL}/offers/collection/${COLLECTION_SLUG}/best?limit=1&token_ids=${tokenId}`;
+    const res = await fetch(url, { headers: osHeaders() });
+    if (!res.ok) return { bestOffer: 0 };
+    const data = await res.json();
+    const offer = data.offers?.[0];
+    if (!offer) return { bestOffer: 0 };
+
+    const raw = offer.price?.value;
+    const decimals = offer.price?.decimals ?? 18;
+    if (!raw) return { bestOffer: 0 };
+
+    return {
+      bestOffer: parseFloat(ethers.formatUnits(raw, decimals)),
+      orderHash: offer.order_hash,
+      protocolAddress: offer.protocol_address,
+    };
+  } catch {
+    return { bestOffer: 0 };
+  }
+}
+
+// GET /listings/collection/{slug}/all  – all active listings for the collection
+async function fetchCollectionListings(limit: number): Promise<FloorListing[]> {
+  const url = `${OS_BASE_URL}/listings/collection/${COLLECTION_SLUG}/all?limit=${limit}`;
+  const res = await fetch(url, { headers: osHeaders() });
+  if (!res.ok) throw new Error(`OpenSea listings error: ${res.status}`);
+  const data = await res.json();
+
+  const listings: FloorListing[] = [];
+  for (const listing of (data.listings ?? [])) {
+    const tokenId = String(
+      listing.protocol_data?.parameters?.offer?.[0]?.identifierOrCriteria ?? '0'
+    );
+    const raw      = listing.price?.current?.value;
+    const decimals = listing.price?.current?.decimals ?? 18;
+    const priceEth = raw ? parseFloat(ethers.formatUnits(raw, decimals)) : 0;
+    if (!priceEth || tokenId === '0') continue;
+
+    listings.push({
+      orderHash:       listing.order_hash,
+      protocolAddress: listing.protocol_address,
+      tokenId,
+      priceEth,
+      imageUrl: `https://basepaint.xyz/api/art/image?day=${tokenId}`,
+    });
+  }
+
+  // Shuffle for a random "explore" feel
+  return listings.sort(() => Math.random() - 0.5);
+}
+
+// ─── Hook ─────────────────────────────────────────────────────────────────────
+
+export function useOpenSea() {
+  const [isLoadingNFTs,    setIsLoadingNFTs]    = useState(false);
+  const [isLoadingOffers,  setIsLoadingOffers]  = useState(false);
+  const [error,            setError]            = useState<string | null>(null);
+
+  // 1. Fetch owned BasePaints
+  const fetchOwnedBasePaints = useCallback(async (walletAddress: string): Promise<CanvasItem[]> => {
     setIsLoadingNFTs(true);
     setError(null);
     try {
-      const sdk = buildReadSDK();
-      // Paginate through all NFTs owned by the account, filter to BasePaint contract
-      const results: CanvasItem[] = [];
-      let cursor: string | undefined = undefined;
-
-      do {
-        const { nfts, next } = await sdk.api.getNFTsByAccount(
-          walletAddress,
-          50,
-          cursor,
-          BASE_CHAIN
-        );
-
-        for (const nft of nfts) {
-          if (
-            nft.contract?.toLowerCase() === BASEPAINT_NFT_CONTRACT.toLowerCase()
-          ) {
-            const tokenId = nft.identifier;
-            const day = parseInt(tokenId, 10);
-            results.push({
-              id: tokenId,
-              day,
-              imageUrl: `https://basepaint.xyz/api/art/image?day=${day}`,
-              lastSale: 0,
-              bestOffer: 0,
-              listPrice: undefined,
-              isListed: false,
-            });
-          }
-        }
-        cursor = next || undefined;
-        // Safety stop: avoid infinite loops if the API has many pages
-        if (!next) break;
-      } while (cursor && results.length < 200);
-
-      return results;
+      return await fetchNFTsByOwner(walletAddress);
     } catch (err: any) {
-      console.error('fetchOwnedBasePaints error:', err);
-      setError(err?.message || 'Failed to fetch owned NFTs');
+      console.error('fetchOwnedBasePaints:', err);
+      setError(err?.message || 'Failed to fetch NFTs');
       return [];
     } finally {
       setIsLoadingNFTs(false);
     }
   }, []);
 
-  // ─── 2. Fetch best offer + current listing for a single token ────────────
-  const fetchTokenMarketData = useCallback(async (
-    tokenId: string
-  ): Promise<{ bestOffer: number; listPrice?: number; isListed: boolean; bestOfferOrderHash?: string }> => {
-    try {
-      const sdk = buildReadSDK();
-
-      // Fetch best offer
-      let bestOffer = 0;
-      let bestOfferOrderHash: string | undefined;
-      try {
-        const offer = await sdk.api.getBestOffer(COLLECTION_SLUG, tokenId);
-        if (offer?.price?.decimals !== undefined && offer?.price?.value) {
-          bestOffer = parseFloat(
-            ethers.formatUnits(offer.price.value, offer.price.decimals)
-          );
-          bestOfferOrderHash = (offer as any).order_hash;
-        }
-      } catch {
-        // No offer exists for this token — that's fine
-      }
-
-      // Fetch best listing (cheapest active ask)
-      let listPrice: number | undefined;
-      let isListed = false;
-      try {
-        const listing = await sdk.api.getBestListing(COLLECTION_SLUG, tokenId);
-        if (listing?.price?.decimals !== undefined && listing?.price?.value) {
-          listPrice = parseFloat(
-            ethers.formatUnits(listing.price.value, listing.price.decimals)
-          );
-          isListed = true;
-        }
-      } catch {
-        // No listing exists — that's fine
-      }
-
-      return { bestOffer, listPrice, isListed, bestOfferOrderHash };
-    } catch (err: any) {
-      console.error(`fetchTokenMarketData error for ${tokenId}:`, err);
-      return { bestOffer: 0, isListed: false };
-    }
-  }, []);
-
-  // ─── 3. Enrich a list of CanvasItems with live market data ───────────────
+  // 2. Enrich items with live market data (batched, with progress callback)
   const enrichWithMarketData = useCallback(async (
     items: CanvasItem[],
     onProgress?: (updated: CanvasItem[]) => void
   ): Promise<CanvasItem[]> => {
     setIsLoadingOffers(true);
     const enriched = [...items];
+    const BATCH = 4; // conservative to avoid rate limits
 
-    // Fetch in parallel batches of 5 to avoid rate limiting
-    const BATCH = 5;
     for (let i = 0; i < enriched.length; i += BATCH) {
-      const batch = enriched.slice(i, i + BATCH);
       await Promise.all(
-        batch.map(async (item, idx) => {
-          const data = await fetchTokenMarketData(item.id);
+        enriched.slice(i, i + BATCH).map(async (_, idx) => {
+          const item = enriched[i + idx];
+          const [listingData, offerData] = await Promise.all([
+            fetchBestListing(item.id),
+            fetchBestOffer(item.id),
+          ]);
           enriched[i + idx] = {
-            ...enriched[i + idx],
-            bestOffer: data.bestOffer,
-            listPrice: data.listPrice,
-            isListed: data.isListed,
-            bestOfferOrderHash: data.bestOfferOrderHash,
+            ...item,
+            listPrice:              listingData.listPrice,
+            isListed:               listingData.isListed,
+            bestOffer:              offerData.bestOffer,
+            bestOfferOrderHash:     offerData.orderHash,
+            bestOfferProtocolAddress: offerData.protocolAddress,
           };
         })
       );
-      // Notify progress so UI can update incrementally
       if (onProgress) onProgress([...enriched]);
     }
 
     setIsLoadingOffers(false);
     return enriched;
-  }, [fetchTokenMarketData]);
+  }, []);
 
-  // ─── 4. Create a listing on OpenSea ──────────────────────────────────────
+  // 3. Create a listing via opensea-js SDK (handles Seaport signing)
   const createListing = useCallback(async (
     walletProvider: any,
     accountAddress: string,
@@ -168,19 +204,15 @@ export function useOpenSea() {
   ): Promise<void> => {
     const sdk = buildSDK(walletProvider);
     const expirationTime = Math.round(Date.now() / 1000 + durationDays * 86400);
-
     await sdk.createListing({
-      asset: {
-        tokenId,
-        tokenAddress: BASEPAINT_NFT_CONTRACT,
-      },
+      asset: { tokenId, tokenAddress: BASEPAINT_NFT_CONTRACT },
       accountAddress,
       startAmount: priceInEth,
       expirationTime,
     });
   }, []);
 
-  // ─── 5. Fulfill (accept) an offer ────────────────────────────────────────
+  // 4. Fulfill an offer (accept best offer on your NFT)
   const fulfillOffer = useCallback(async (
     walletProvider: any,
     accountAddress: string,
@@ -188,57 +220,22 @@ export function useOpenSea() {
     protocolAddress: string
   ): Promise<string> => {
     const sdk = buildSDK(walletProvider);
-
-    // Get the full order object by hash
-    const order = await sdk.api.getOrderByHash(
-      orderHash,
-      protocolAddress,
-      BASE_CHAIN
-    );
-
-    // Fulfill the order (this sends the on-chain tx)
-    const txHash = await sdk.fulfillOrder({
-      order,
-      accountAddress,
-    });
-
+    const order = await sdk.api.getOrder({ orderHash, protocolAddress, side: 'offer' } as any);
+    const txHash = await sdk.fulfillOrder({ order, accountAddress });
     return typeof txHash === 'string' ? txHash : (txHash as any)?.hash || '';
   }, []);
 
-  // ─── 6. Fetch cheapest active listings for the collection (floor) ────────
-  const fetchFloorListings = useCallback(async (limit = 8): Promise<FloorListing[]> => {
+  // 5. Fetch floor listings for "Keep exploring"
+  const fetchFloorListings = useCallback(async (limit = 10): Promise<FloorListing[]> => {
     try {
-      const sdk = buildReadSDK();
-      // Fetch listings and shuffle for a random "explore" feel
-      const { orders } = await sdk.api.getListings({
-        assetContractAddress: BASEPAINT_NFT_CONTRACT,
-        tokenIds: undefined,
-        side: OrderSide.ASK,
-        limit,
-      });
-
-      return orders.map((order: any) => {
-        const tokenId = order.taker_asset_bundle?.assets?.[0]?.token_id
-          ?? order.protocol_data?.parameters?.offer?.[0]?.identifierOrCriteria
-          ?? '0';
-        const priceEth = order.current_price
-          ? parseFloat(ethers.formatEther(order.current_price))
-          : 0;
-        return {
-          orderHash: order.order_hash,
-          protocolAddress: order.protocol_address,
-          tokenId: String(tokenId),
-          priceEth,
-          imageUrl: `https://basepaint.xyz/api/art/image?day=${tokenId}`,
-        };
-      }).filter((l: FloorListing) => l.priceEth > 0).sort(() => Math.random() - 0.5);
+      return await fetchCollectionListings(limit);
     } catch (err: any) {
-      console.error('fetchFloorListings error:', err);
+      console.error('fetchFloorListings:', err);
       return [];
     }
   }, []);
 
-  // ─── 7. Fulfill (buy) a listing ──────────────────────────────────────────
+  // 6. Buy a listing (fulfill as buyer)
   const fulfillListing = useCallback(async (
     walletProvider: any,
     accountAddress: string,
@@ -246,18 +243,8 @@ export function useOpenSea() {
     protocolAddress: string
   ): Promise<string> => {
     const sdk = buildSDK(walletProvider);
-
-    const order = await sdk.api.getOrderByHash(
-      orderHash,
-      protocolAddress,
-      BASE_CHAIN
-    );
-
-    const txHash = await sdk.fulfillOrder({
-      order,
-      accountAddress,
-    });
-
+    const order = await sdk.api.getOrder({ orderHash, protocolAddress, side: 'ask' } as any);
+    const txHash = await sdk.fulfillOrder({ order, accountAddress });
     return typeof txHash === 'string' ? txHash : (txHash as any)?.hash || '';
   }, []);
 
@@ -267,7 +254,6 @@ export function useOpenSea() {
     error,
     fetchOwnedBasePaints,
     enrichWithMarketData,
-    fetchTokenMarketData,
     createListing,
     fulfillOffer,
     fetchFloorListings,
@@ -275,7 +261,8 @@ export function useOpenSea() {
   };
 }
 
-// ─── Exported type for floor listings ────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
+
 export interface FloorListing {
   orderHash: string;
   protocolAddress: string;
