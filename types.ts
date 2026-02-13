@@ -6,6 +6,8 @@ export interface CanvasItem {
   listPrice?: number;
   bestOffer: number;
   isListed?: boolean;
+  bestOfferOrderHash?: string;
+  bestOfferProtocolAddress?: string;
 }
 
 export interface SubscriptionPlan {

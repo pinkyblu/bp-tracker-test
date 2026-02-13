@@ -1,137 +1,153 @@
-import React, { useState, useRef, useCallback } from 'react';
-import { Sparkles, Loader2, ExternalLink, ShoppingCart } from 'lucide-react';
-import { BASEPAINT_NFT_CONTRACT } from '../constants';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Sparkles, Loader2, RefreshCw, ShoppingCart } from 'lucide-react';
+import { useOpenSea, FloorListing } from '../hooks/useOpenSea';
+import { useWallet } from '../hooks/useWallet';
 import sdk from '@farcaster/frame-sdk';
-
-interface FeaturedItem {
-  tokenId: string;
-  imageUrl: string;
-  title: string;
-  price: string;
-}
-
-const MOCK_FEATURED_ITEMS: FeaturedItem[] = [
-  {
-    tokenId: "542",
-    imageUrl: "https://basepaint.xyz/api/art/image?day=542",
-    title: "BasePaint #542",
-    price: "0.012"
-  },
-  {
-    tokenId: "420",
-    imageUrl: "https://basepaint.xyz/api/art/image?day=420",
-    title: "BasePaint #420",
-    price: "0.069"
-  },
-  {
-    tokenId: "312",
-    imageUrl: "https://basepaint.xyz/api/art/image?day=312",
-    title: "BasePaint #312",
-    price: "0.005"
-  },
-  {
-    tokenId: "101",
-    imageUrl: "https://basepaint.xyz/api/art/image?day=101",
-    title: "BasePaint #101",
-    price: "0.15"
-  },
-  {
-    tokenId: "24",
-    imageUrl: "https://basepaint.xyz/api/art/image?day=24",
-    title: "BasePaint #24",
-    price: "0.22"
-  }
-];
 
 interface FeaturedCanvasesProps {
   onShowToast: (msg: string, type?: 'success' | 'error') => void;
 }
 
 const FeaturedCanvases: React.FC<FeaturedCanvasesProps> = ({ onShowToast }) => {
-  const [items] = useState<FeaturedItem[]>(MOCK_FEATURED_ITEMS);
-  const [purchasingId, setPurchasingId] = useState<string | null>(null);
-  
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  
-  const handleBuy = useCallback(async (item: FeaturedItem) => {
-    setPurchasingId(item.tokenId);
-    
-    const url = `https://opensea.io/assets/base/${BASEPAINT_NFT_CONTRACT}/${item.tokenId}`;
-    
-    // Slight delay to show feedback
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    try {
-        await sdk.actions.openUrl(url);
-        onShowToast(`Opening listing for #${item.tokenId}...`, 'success');
-    } catch (e) {
-        console.error("Failed to open URL via SDK", e);
-        window.open(url, '_blank');
-        onShowToast(`Opening OpenSea...`, 'success');
-    } finally {
-        setPurchasingId(null);
+  const { address, connect } = useWallet();
+  const { fetchFloorListings, fulfillListing } = useOpenSea();
+
+  const [items, setItems]         = useState<FloorListing[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [buyingId, setBuyingId]   = useState<string | null>(null); // orderHash being bought
+
+  // ── Load floor listings on mount ─────────────────────────────────────────
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    const listings = await fetchFloorListings(8);
+    setItems(listings);
+    setIsLoading(false);
+  }, [fetchFloorListings]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // ── Buy a listing directly on-chain ──────────────────────────────────────
+  const handleBuy = useCallback(async (item: FloorListing) => {
+    if (!address) {
+      await connect();
+      return;
     }
-  }, [onShowToast]);
+
+    setBuyingId(item.orderHash);
+    try {
+      const provider = (sdk as any)?.wallet?.ethProvider || window.ethereum;
+      if (!provider) throw new Error('No wallet provider found');
+
+      const txHash = await fulfillListing(
+        provider,
+        address,
+        item.orderHash,
+        item.protocolAddress
+      );
+
+      // Remove bought item from the list
+      setItems(prev => prev.filter(i => i.orderHash !== item.orderHash));
+      onShowToast(`Bought BasePaint #${item.tokenId} for ${item.priceEth} ETH ✓`, 'success');
+    } catch (err: any) {
+      const msg = err?.message?.includes('rejected')
+        ? 'Purchase cancelled'
+        : err?.message || 'Failed to complete purchase';
+      onShowToast(msg, 'error');
+    } finally {
+      setBuyingId(null);
+    }
+  }, [address, connect, fulfillListing, onShowToast]);
 
   return (
     <div className="mb-6">
+      {/* Header */}
       <div className="flex items-center justify-between mb-3 px-1">
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-            <Sparkles size={20} />
-            Keep exploring
+          <Sparkles size={20} />
+          Keep exploring
         </h2>
+        <button
+          onClick={load}
+          disabled={isLoading}
+          className="p-1.5 bg-gray-100 rounded-lg hover:bg-gray-200 text-gray-500 disabled:opacity-40"
+          title="Refresh listings"
+        >
+          <RefreshCw size={13} className={isLoading ? 'animate-spin' : ''} />
+        </button>
       </div>
-      
-      <div 
-        ref={scrollContainerRef}
-        className="flex overflow-x-auto gap-4 pb-4 -mx-4 px-4 no-scrollbar snap-x mandatory cursor-grab"
-      >
-        {items.map((item) => (
-          <div 
-            key={item.tokenId} 
-            className="snap-center min-w-[170px] bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col transition-colors animate-in fade-in zoom-in-95 duration-300"
-          >
-            <div className="relative w-full aspect-square bg-gray-100 group">
-                <img 
-                  src={item.imageUrl} 
-                  alt={`#${item.tokenId}`} 
-                  className="w-full h-full object-cover" 
+
+      {/* Loading skeleton */}
+      {isLoading ? (
+        <div className="flex gap-4 overflow-x-auto -mx-4 px-4 pb-4 no-scrollbar">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="min-w-[160px] bg-white rounded-xl border border-gray-200 overflow-hidden flex-shrink-0 animate-pulse">
+              <div className="aspect-square bg-gray-100" />
+              <div className="p-3 space-y-2">
+                <div className="h-3 bg-gray-100 rounded w-2/3" />
+                <div className="h-3 bg-gray-100 rounded w-1/2" />
+                <div className="h-7 bg-gray-100 rounded-lg mt-2" />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : items.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-10 bg-white rounded-2xl border border-dashed border-gray-300">
+          <p className="text-gray-400 text-sm">No listings found right now.</p>
+          <button onClick={load} className="mt-3 text-xs text-blue-500 hover:underline">Try again</button>
+        </div>
+      ) : (
+        /* Horizontal scroll list */
+        <div className="flex overflow-x-auto gap-4 pb-4 -mx-4 px-4 no-scrollbar snap-x snap-mandatory">
+          {items.map((item) => (
+            <div
+              key={item.orderHash}
+              className="snap-center min-w-[160px] bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col flex-shrink-0"
+            >
+              {/* Image */}
+              <div className="relative w-full aspect-square bg-gray-100">
+                <img
+                  src={item.imageUrl}
+                  alt={`#${item.tokenId}`}
+                  className="w-full h-full object-cover"
                   draggable={false}
                 />
                 <div className="absolute top-2 right-2 bg-black/60 text-white text-[10px] font-bold px-1.5 py-0.5 rounded backdrop-blur-sm">
                   #{item.tokenId}
                 </div>
+              </div>
+
+              {/* Info + Buy */}
+              <div className="p-3 flex flex-col gap-2 flex-1 justify-between">
+                <div className="font-bold text-xs text-gray-900 leading-tight">
+                  BasePaint #{item.tokenId}
+                </div>
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-[10px] text-gray-500">Price</span>
+                    <span className="text-xs font-bold text-gray-900">
+                      {item.priceEth.toFixed(5)} Ξ
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => handleBuy(item)}
+                    disabled={buyingId !== null}
+                    className="w-full bg-[#2D2D2D] hover:bg-black text-white font-bold py-2 rounded-lg text-xs transition-colors flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                  >
+                    {buyingId === item.orderHash ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <>
+                        <ShoppingCart size={13} />
+                        {address ? 'Buy' : 'Connect & Buy'}
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
             </div>
-            <div className="p-3 flex flex-col gap-2 flex-1 justify-between">
-                 <div className="font-bold text-xs text-gray-900 truncate leading-tight">
-                     {item.title}
-                 </div>
-                 <div>
-                    <div className="flex justify-between items-center mb-2">
-                        <span className="text-[10px] text-gray-500">Floor Price</span>
-                        <span className="text-xs font-bold text-gray-900">
-                            {item.price} Ξ
-                        </span>
-                    </div>
-                    <button
-                        onClick={() => handleBuy(item)}
-                        disabled={purchasingId !== null}
-                        className="w-full bg-[#2D2D2D] text-white font-bold py-2 rounded-lg text-xs hover:bg-black transition-colors flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
-                    >
-                        {purchasingId === item.tokenId ? (
-                            <Loader2 size={14} className="animate-spin" />
-                        ) : (
-                            <>
-                                <ShoppingCart size={14} />
-                                Buy
-                            </>
-                        )}
-                    </button>
-                 </div>
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

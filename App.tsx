@@ -6,13 +6,10 @@ import FeaturedCanvases from './components/FeaturedCanvases';
 import Toast from './components/Toast';
 import { ShieldAlert, LayoutDashboard } from 'lucide-react';
 import { useWallet } from './hooks/useWallet';
-import { PORTFOLIO_ITEMS } from './constants';
 
 const App: React.FC = () => {
   const [toastMessage, setToastMessage] = useState<{ msg: string, type: 'success' | 'error' } | null>(null);
-  const [isDarkMode] = useState(false);
   const [isSyncingWallet, setIsSyncingWallet] = useState(false);
-  const [portfolioItems, setPortfolioItems] = useState(PORTFOLIO_ITEMS);
 
   const { address, connect, error: walletError } = useWallet();
   const didAutoConnect = useRef(false);
@@ -51,14 +48,6 @@ const App: React.FC = () => {
     setToastMessage(null);
   }, []);
 
-  const handleUpdateItem = (updatedItem: any) => {
-    setPortfolioItems(prev => prev.map(item => item.id === updatedItem.id ? updatedItem : item));
-  };
-
-  const handleRemoveItem = (id: string) => {
-    setPortfolioItems(prev => prev.filter(item => item.id !== id));
-  };
-
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-gray-200 text-gray-900 transition-colors">
       <main className="flex-1 overflow-hidden flex flex-col">
@@ -76,31 +65,24 @@ const App: React.FC = () => {
               <MintSection ref={mintSectionRef} onShowToast={showToast} />
             </div>
 
-            {/* 2. Portfolio Stats Info below Mint Section */}
-            <div className="mt-1 mb-6">
-                <div className="flex items-center gap-2 mb-4 ml-1">
-                    <LayoutDashboard className="text-gray-400" size={22} />
-                    <h2 className="text-xl font-bold text-gray-900">Your Portfolio</h2>
-                </div>
-                <StatsOverview items={portfolioItems} isLoading={false} />
+            {/* 2. Portfolio Stats + Canvas List */}
+            <div className="mt-4">
+              <div className="flex items-center gap-2 mb-4 ml-1">
+                <LayoutDashboard className="text-gray-400" size={22} />
+                <h2 className="text-xl font-bold text-gray-900">Your Portfolio</h2>
+              </div>
+
+              {/* CanvasList now manages its own data loading from OpenSea */}
+              <div className="py-2">
+                <CanvasList onShowToast={showToast} />
+              </div>
             </div>
 
-            {/* 3. Your Canvases List */}
-            <div className="py-2">
-                <CanvasList 
-                    items={portfolioItems} 
-                    onShowToast={showToast} 
-                    onUpdateItem={handleUpdateItem}
-                    onRemoveItem={handleRemoveItem}
-                    isLoading={false}
-                />
-            </div>
-
-            {/* 4. Secondary Market Section - Featured Canvases */}
+            {/* 3. Secondary Market Section - Featured Canvases */}
             <div className="mt-8">
-                <FeaturedCanvases onShowToast={showToast} />
+              <FeaturedCanvases onShowToast={showToast} />
             </div>
-            
+
             <div className="mt-8 pb-12 text-center">
               <p className="text-[10px] text-gray-400 font-medium uppercase tracking-widest">
                 Basepaint tracker by pinkyblu.eth
@@ -111,10 +93,10 @@ const App: React.FC = () => {
       </main>
 
       {toastMessage && (
-        <Toast 
-          message={toastMessage.msg} 
-          type={toastMessage.type} 
-          onClose={closeToast} 
+        <Toast
+          message={toastMessage.msg}
+          type={toastMessage.type}
+          onClose={closeToast}
         />
       )}
     </div>
